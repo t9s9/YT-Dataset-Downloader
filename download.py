@@ -130,7 +130,7 @@ def main(csv_path: str,
             status_list.append(download_wrapper(row, label_to_dir, structure_by, time_format, retries))
     else:
         status_list = ProgressParallel(use_tqdm=verbose, total=dataset.shape[0], n_jobs=n_jobs, prefer='threads')(
-            delayed(download_wrapper)((row, label_to_dir, structure_by, time_format, retries) for row in it)
+            delayed(download_wrapper)(row, label_to_dir, structure_by, time_format, retries) for row in it
         )
 
     default_dir = label_to_dir.default_factory()
