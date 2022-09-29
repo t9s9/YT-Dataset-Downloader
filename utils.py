@@ -1,3 +1,6 @@
+import subprocess
+from typing import List, Tuple
+
 from joblib import Parallel
 from tqdm.auto import tqdm
 
@@ -17,3 +20,13 @@ class ProgressParallel(Parallel):
             self._pbar.total = self.n_dispatched_tasks
         self._pbar.n = self.n_completed_tasks
         self._pbar.refresh()
+
+
+def apply_subprocess(command: List[str]) -> Tuple[bool, str]:
+    command = ' '.join(command)
+    try:
+        subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as error:
+        return False, str(error.output)
+
+    return True, 'success'
