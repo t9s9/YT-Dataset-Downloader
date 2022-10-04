@@ -1,7 +1,6 @@
 import argparse
 import json
 import shutil
-import subprocess
 import uuid
 import warnings
 from collections import defaultdict
@@ -12,72 +11,54 @@ import pandas as pd
 from joblib import delayed
 from tqdm import tqdm
 
-from utils import ProgressParallel
+from postprocess import compress_video, VideoPreset
+from utils import ProgressParallel, apply_subprocess
 
 
 class VideoClipInfo(NamedTuple):
     video_id: str
-    start_time: int
-    end_time: int
+    start_time: Optional[int]
+    end_time: Optional[int]
     split: Optional[str]
-    label: Optional[str]
 
 
 def download_video(video_id: str,
                    output_filename: Path,
-                   start_time: int,
-                   end_time: int,
+                   start_time: Optional[int] = None,
+                   end_time: Optional[int] = None,
                    num_retries: int = 5,
-                   post_process_args: Optional[Dict] = None,
+                   postprocess: bool = False,
+                   post_process_args: Dict = {},
                    url_base: str = 'https://www.youtube.com/watch?v=',
                    ) -> Tuple[bool, str]:
     assert len(video_id) == 11, f'video_identifier must have length 11 but got {video_id}'
-    status = False
 
     if post_process_args is None:
         tmp_filename = output_filename
     else:
         tmp_filename = (output_filename.parent.parent / 'tmp') / f'{uuid.uuid4()}.mp4'
 
+    section = f'--download-sections *{start_time}-{end_time}' if start_time is not None and end_time is not None else ''
+
     command = ['yt-dlp',
                '--quiet',
                '--no-warnings',
-               '--retries', str(num_retries),
+               '--retries', f'{num_retries}',
                '-f', 'mp4',
-               '--download-sections', f'*{start_time}-{end_time}',
+               section,
                '-o', f'{tmp_filename}',
                f'{url_base + video_id}']
-    try:
-        subprocess.check_output(command, shell=False, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError as error:
-        return status, str(error.output)
+    downloaded, log = apply_subprocess(command)
 
-    if post_process_args is not None:
-        default = dict(crf='18', preset='veryslow', width='224', height='224')
-        default.update(post_process_args)
+    if postprocess is not None and downloaded:
+        post_success, post_log = compress_video(tmp_filename, output_filename, **post_process_args)
 
-        command = ['ffmpeg',
-                   '-i', f'"{tmp_filename}"',
-                   '-vf', f"scale={default['width']}:{default['height']}",
-                   '-c:v', 'libx264',
-                   '-crf', str(default['crf']),
-                   '-preset', str(default['preset']),
-                   '-c:a', 'copy',
-                   '-threads', '1',
-                   '-loglevel', 'panic',
-                   f'"{output_filename}"']
-        command = ' '.join(command)
-
-        try:
-            subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError as error:
-            return status, str(error.output)
-
+        # remove tmp file
         tmp_filename.unlink()
+        return post_success, log + '\n' + post_log
 
     status = output_filename.exists()
-
-    return status, 'Downloaded'
+    return status, log
 
 
 def download_wrapper(row: VideoClipInfo,
@@ -85,28 +66,25 @@ def download_wrapper(row: VideoClipInfo,
                      by: Optional[str] = None,
                      time_format: str = '05d',
                      num_retries: int = 5,
-                     post_process_args: Optional[Dict] = None) -> Tuple[str, bool, str]:
+                     postprocess: bool = False,
+                     post_process_args: Dict = {}) -> Tuple[str, bool, str]:
     filename = get_video_filename(row, label_to_dir, by, time_format)
 
     if filename.exists():
-        return row.video_id, True, 'Exists'
+        return row.video_id, True, 'exists'
 
     downloaded, log = download_video(row.video_id, filename, row.start_time, row.end_time, num_retries,
-                                     post_process_args)
+                                     postprocess, post_process_args)
 
     return row.video_id, downloaded, log
 
 
 def parse_input(csv_path: Union[str, Path]) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-    columns = dict([
-        ('youtube_id', 'video_id'),
-        ('time_start', 'start_time'),
-        ('time_end', 'end_time'),
-    ])
-    df.rename(columns=columns, inplace=True)
-    df['start_time'] = df['start_time'].apply(int)
-    df['end_time'] = df['end_time'].apply(int)
+    df = df.rename(columns={'youtube_id': 'video_id', 'time_start': 'start_time', 'time_end': 'end_time'})
+    df = df.drop(columns=df.columns.difference(VideoClipInfo._fields))
+    df['start_time'] = df['start_time'].apply(int) if 'start_time' in df.columns else None
+    df['end_time'] = df['end_time'].apply(int) if 'end_time' in df.columns else None
     return df
 
 
@@ -114,10 +92,11 @@ def create_dir(dataset: pd.DataFrame,
                output_dir: Union[str, Path],
                by: Optional[str] = None) -> defaultdict[Path]:
     output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
     data_dir = output_dir / 'data'
     data_dir.mkdir(exist_ok=True)
 
-    (output_dir / 'tmp').mkdir(exist_ok=False)
+    (output_dir / 'tmp').mkdir(exist_ok=True)
 
     label_to_dir = defaultdict(lambda: data_dir)
 
@@ -137,11 +116,13 @@ def get_video_filename(row: VideoClipInfo,
                        label_to_dir: defaultdict[Path],
                        by: Optional[str] = None,
                        time_format: str = '06d') -> Path:
-    filename = f"{row.video_id}_{row.start_time:{time_format}}_{row.end_time:{time_format}}.mp4"
-    if by is None:
-        base = label_to_dir.default_factory()
+    if row.start_time is None and row.end_time is None:
+        filename = f"{row.video_id}.mp4"
     else:
-        base = label_to_dir[getattr(row, by)]
+        filename = f"{row.video_id}_{row.start_time:{time_format}}_{row.end_time:{time_format}}.mp4"
+
+    base = label_to_dir.default_factory() if by is None else label_to_dir[getattr(row, by)]
+
     return base / filename
 
 
@@ -151,7 +132,8 @@ def main(csv_path: str,
          time_format: str = '06d',
          retries: int = 5,
          n_jobs: int = 32,
-         post_process_args: Optional[Dict] = dict(crf='18', preset='veryslow', width='224', height='224'),
+         postprocess: bool = False,
+         post_process_args: Dict = {},
          verbose: bool = True) -> List:
     csv_path = Path(csv_path)
     output_dir = Path(output_dir)
@@ -170,8 +152,8 @@ def main(csv_path: str,
                 download_wrapper(row, label_to_dir, structure_by, time_format, retries, post_process_args))
     else:
         status_list = ProgressParallel(use_tqdm=verbose, total=dataset.shape[0], n_jobs=n_jobs, prefer='threads')(
-            delayed(download_wrapper)(row, label_to_dir, structure_by, time_format, retries, post_process_args) for row
-            in it
+            delayed(download_wrapper)(row, label_to_dir, structure_by, time_format, retries, postprocess,
+                                      post_process_args) for row in it
         )
 
     default_dir = label_to_dir.default_factory()
@@ -181,8 +163,19 @@ def main(csv_path: str,
     shutil.rmtree((output_dir / 'tmp'))
 
     report_path = output_dir / (csv_path.stem + '_download_report.json')
+    report = dict(
+        csv_path=str(csv_path),
+        output_dir=str(output_dir),
+        structure_by=structure_by,
+        time_format=time_format,
+        retries=retries,
+        n_jobs=n_jobs,
+        postprocess=postprocess,
+        post_process_args=post_process_args,
+        status_list=status_list
+    )
     with open(report_path, 'w') as f:
-        json.dump(status_list, f)
+        json.dump(report, f)
 
     print(f"Downloaded {len(list(filter(lambda x: x[1], status_list)))} / {len(status_list)} videos. See {report_path} "
           f"for download report.")
@@ -190,8 +183,7 @@ def main(csv_path: str,
 
 
 if __name__ == '__main__':
-    description = 'Helper script for downloading and trimming kinetics videos.'
-    parser = argparse.ArgumentParser(description=description)
+    parser = argparse.ArgumentParser(description='Helper script for downloading and trimming videos.')
     parser.add_argument('csv_path', type=str,
                         help=('CSV file containing the following columns: '
                               'youtube_id, time_start, time_end (optional: label, split)'))
@@ -209,4 +201,22 @@ if __name__ == '__main__':
     parser.add_argument('-q', '--quiet', action='store_false', dest='verbose',
                         help='Prevent the display of a progress bar')
 
-    main(**vars(parser.parse_args()))
+    post_parsers = parser.add_subparsers(required=False, description='Postprocessing arguments',
+                                         dest='postprocess')
+    post_parser = post_parsers.add_parser('postprocess', help='Postprocess the downloaded videos')
+    post_parser.add_argument('--width', help='Width of the output video', type=int, default=224)
+    post_parser.add_argument('--height', help='Height of the output video', type=int, default=224)
+    post_parser.add_argument('--codec', help='Codec', type=str, default='libx265')
+    post_parser.add_argument('--crf', help='CRF', type=int, default=28)
+    post_parser.add_argument('--preset', help='Preset', type=VideoPreset, default=VideoPreset.medium)
+    post_parser.add_argument('--fps', help='Frames per second', type=int, default=30)
+    post_parser.add_argument('--ar', help='Audio sample rate', type=int, default=32000)
+    post_parser.add_argument('--ac', help='Number of audio channels', type=int, default=1)
+
+    args = vars(parser.parse_args())
+    if args.pop('postprocess') is not None:
+        args['post_process_args'] = {}
+        for k in ['width', 'height', 'codec', 'crf', 'preset', 'fps', 'ar', 'ac']:
+            args['post_process_args'][k] = args.pop(k)
+    print(args)
+    main(**args)
