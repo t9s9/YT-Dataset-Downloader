@@ -141,6 +141,7 @@ def main(csv_path: str,
     dataset = parse_input(csv_path)
     label_to_dir = create_dir(dataset, output_dir, by=structure_by)
 
+    dataset = dataset.iloc[:int(dataset.shape[0] * 0.75)]
     it = dataset.itertuples(name='VideoClipInfo')
 
     if n_jobs == 1:
