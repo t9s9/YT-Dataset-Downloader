@@ -55,7 +55,7 @@ def download_video(video_id: str,
 
         # remove tmp file
         tmp_filename.unlink()
-        return post_success, log + '\n' + post_log
+        return post_success, log + 'Postprocess: ' + post_log
 
     status = output_filename.exists()
     return status, log
@@ -218,5 +218,4 @@ if __name__ == '__main__':
         args['post_process_args'] = {}
         for k in ['width', 'height', 'codec', 'crf', 'preset', 'fps', 'ar', 'ac']:
             args['post_process_args'][k] = args.pop(k)
-    print(args)
     main(**args)
