@@ -33,10 +33,10 @@ def download_video(video_id: str,
                    ) -> Tuple[bool, str]:
     assert len(video_id) == 11, f'video_identifier must have length 11 but got {video_id}'
 
-    if post_process_args is None:
-        tmp_filename = output_filename
-    else:
+    if postprocess:
         tmp_filename = (output_filename.parent.parent / 'tmp') / f'{uuid.uuid4()}.mp4'
+    else:
+        tmp_filename = output_filename
 
     section = f'--download-sections *{start_time}-{end_time}' if start_time is not None and end_time is not None else ''
 
@@ -50,7 +50,7 @@ def download_video(video_id: str,
                f'{url_base + video_id}']
     downloaded, log = apply_subprocess(command)
 
-    if postprocess is not None and downloaded:
+    if postprocess and downloaded:
         post_success, post_log = compress_video(tmp_filename, output_filename, **post_process_args)
 
         # remove tmp file
@@ -141,7 +141,6 @@ def main(csv_path: str,
     dataset = parse_input(csv_path)
     label_to_dir = create_dir(dataset, output_dir, by=structure_by)
 
-    dataset = dataset.iloc[:int(dataset.shape[0] * 0.75)]
     it = dataset.itertuples(name='VideoClipInfo')
 
     if n_jobs == 1:
@@ -150,7 +149,8 @@ def main(csv_path: str,
             it = tqdm(it, desc='Crawling from YT', total=dataset.shape[0])
         for row in it:
             status_list.append(
-                download_wrapper(row, label_to_dir, structure_by, time_format, retries, post_process_args))
+                download_wrapper(row, label_to_dir, structure_by, time_format, retries, postprocess,
+                                 post_process_args))
     else:
         status_list = ProgressParallel(use_tqdm=verbose, total=dataset.shape[0], n_jobs=n_jobs, prefer='threads')(
             delayed(download_wrapper)(row, label_to_dir, structure_by, time_format, retries, postprocess,
@@ -197,7 +197,7 @@ if __name__ == '__main__':
                         help='Format of the timestamp in the filename of the videos')
     parser.add_argument('-n', '--n_jobs', type=int, default=32,
                         help='Number of jobs')
-    parser.add_argument('-r', '--retries', type=int, default=10,
+    parser.add_argument('-r', '--retries', type=int, default=5,
                         help='Number of retries for downloading one video')
     parser.add_argument('-q', '--quiet', action='store_false', dest='verbose',
                         help='Prevent the display of a progress bar')
@@ -209,7 +209,7 @@ if __name__ == '__main__':
     post_parser.add_argument('--height', help='Height of the output video', type=int, default=224)
     post_parser.add_argument('--codec', help='Codec', type=str, default='libx265')
     post_parser.add_argument('--crf', help='CRF', type=int, default=28)
-    post_parser.add_argument('--preset', help='Preset', type=VideoPreset, default=VideoPreset.medium)
+    post_parser.add_argument('--preset', help='Preset', type=VideoPreset, default=VideoPreset.fast)
     post_parser.add_argument('--fps', help='Frames per second', type=int, default=30)
     post_parser.add_argument('--ar', help='Audio sample rate', type=int, default=32000)
     post_parser.add_argument('--ac', help='Number of audio channels', type=int, default=1)
@@ -217,6 +217,9 @@ if __name__ == '__main__':
     args = vars(parser.parse_args())
     if args.pop('postprocess') is not None:
         args['post_process_args'] = {}
+        args['postprocess'] = True
         for k in ['width', 'height', 'codec', 'crf', 'preset', 'fps', 'ar', 'ac']:
             args['post_process_args'][k] = args.pop(k)
+
+    print(args)
     main(**args)
